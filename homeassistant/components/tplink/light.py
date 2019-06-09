@@ -5,7 +5,8 @@ import time
 from pyHS100 import SmartBulb, SmartDeviceException
 
 from homeassistant.components.light import (
-    ATTR_BRIGHTNESS, ATTR_COLOR_TEMP, ATTR_HS_COLOR, SUPPORT_BRIGHTNESS,
+    ATTR_BRIGHTNESS, ATTR_COLOR_TEMP, ATTR_HS_COLOR, ATTR_TRANSITION,
+    SUPPORT_BRIGHTNESS, SUPPORT_TRANSITION,
     SUPPORT_COLOR, SUPPORT_COLOR_TEMP, Light)
 import homeassistant.helpers.device_registry as dr
 from homeassistant.helpers.typing import HomeAssistantType
@@ -130,24 +131,59 @@ class TPLinkSmartBulb(Light):
 
     def turn_on(self, **kwargs):
         """Turn the light on."""
-        self.smartbulb.state = SmartBulb.BULB_STATE_ON
-
-        if ATTR_COLOR_TEMP in kwargs:
-            self.smartbulb.color_temp = \
-                mired_to_kelvin(kwargs[ATTR_COLOR_TEMP])
+        light_state = {"on_off": 1}
 
         brightness = brightness_to_percentage(
             kwargs.get(ATTR_BRIGHTNESS, self.brightness or 255))
-        if ATTR_HS_COLOR in kwargs:
-            hue, sat = kwargs.get(ATTR_HS_COLOR)
-            hsv = (int(hue), int(sat), brightness)
-            self.smartbulb.hsv = hsv
-        elif ATTR_BRIGHTNESS in kwargs:
-            self.smartbulb.brightness = brightness
+
+        if not (0 <= brightness <= 255):
+            raise SmartDeviceException(
+                'Invalid brightness value: {} '
+                '(valid range: 0-255)'.format(brightness))
+
+        if self.smartbulb.is_dimmable:
+            if ATTR_TRANSITION in kwargs:
+                light_state['transition_period'] = \
+                    int(kwargs[ATTR_TRANSITION])
+
+            light_state['brightness'] = brightness_to_percentage(brightness)
+
+        if self.smartbulb.is_variable_color_temp:
+            if ATTR_COLOR_TEMP in kwargs:
+                temp = kwargs[ATTR_COLOR_TEMP]
+                if self._min_mireds < temp <= self._max_mireds:
+                    light_state['color_temp'] = \
+                        mired_to_kelvin(kwargs[ATTR_COLOR_TEMP])
+
+        if self.smartbulb.is_color:
+            if ATTR_HS_COLOR in kwargs:
+                hue, sat = kwargs.get(ATTR_HS_COLOR)
+                if not (0 <= hue <= 360):
+                    raise SmartDeviceException(
+                        'Invalid hue value: {} '
+                        '(valid range: 0-360)'.format(hue))
+
+                if not (0 <= sat <= 100):
+                    raise SmartDeviceException(
+                        'Invalid saturation value: {} '
+                        '(valid range: 0-100%)'.format(sat))
+
+            light_state['hue'] = hue
+            light_state['saturation'] = sat
+            light_state['brightness'] = brightness_to_percentage(brightness)
+
+        self.smartbulb.set_light_state(light_state)
 
     def turn_off(self, **kwargs):
         """Turn the light off."""
-        self.smartbulb.state = SmartBulb.BULB_STATE_OFF
+        light_state = {"on_off": 0}
+
+        if self.smartbulb.is_dimmable:
+            if ATTR_TRANSITION in kwargs:
+                light_state['transition_period'] = \
+                    int(kwargs[ATTR_TRANSITION])
+
+        self.smartbulb.set_light_state(light_state)
 
     @property
     def min_mireds(self):
@@ -241,6 +277,7 @@ class TPLinkSmartBulb(Light):
 
         if self.smartbulb.is_dimmable:
             self._supported_features += SUPPORT_BRIGHTNESS
+            self._supported_features += SUPPORT_TRANSITION
         if getattr(self.smartbulb, 'is_variable_color_temp', False):
             self._supported_features += SUPPORT_COLOR_TEMP
             self._min_mireds = kelvin_to_mired(
